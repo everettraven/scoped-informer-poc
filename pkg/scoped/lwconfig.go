@@ -7,7 +7,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -22,7 +21,7 @@ func NewScopedListerWatcherConfiguration() *ScopedListerWatcherConfiguration {
 	return &ScopedListerWatcherConfiguration{}
 }
 
-func (slwc *ScopedListerWatcherConfiguration) GetStructuredListerWatcher(config *rest.Config, mapping *meta.RESTMapping, scheme runtime.Scheme) (cache.ListerWatcher, error) {
+func (slwc *ScopedListerWatcherConfiguration) GetStructuredListerWatcher(config *rest.Config, mapping *meta.RESTMapping, scheme *runtime.Scheme) (cache.ListerWatcher, error) {
 	cli, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("encountered an error creating the client for the ScopedListerWatcher")
@@ -53,12 +52,17 @@ func (slwc *ScopedListerWatcherConfiguration) GetStructuredListerWatcher(config 
 			return listObj, nil
 		},
 		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-			return lw.Watch(options)
+			watcher, err := lw.Watch(options)
+			if err != nil {
+				return nil, err
+			}
+
+			return structuredWatcher(watcher, mapping, scheme), nil
 		},
 	}, nil
 }
 
-func (slwc *ScopedListerWatcherConfiguration) GetUnstructuredListerWatcher(config *rest.Config, mapping *meta.RESTMapping, scheme runtime.Scheme) (cache.ListerWatcher, error) {
+func (slwc *ScopedListerWatcherConfiguration) GetUnstructuredListerWatcher(config *rest.Config, mapping *meta.RESTMapping, scheme *runtime.Scheme) (cache.ListerWatcher, error) {
 	cli, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("encountered an error creating the client for the ScopedListerWatcher")
@@ -76,7 +80,7 @@ func (slwc *ScopedListerWatcherConfiguration) GetUnstructuredListerWatcher(confi
 	}, nil
 }
 
-func (slwc *ScopedListerWatcherConfiguration) GetMetadataListerWatcher(config *rest.Config, mapping *meta.RESTMapping, scheme runtime.Scheme) (cache.ListerWatcher, error) {
+func (slwc *ScopedListerWatcherConfiguration) GetMetadataListerWatcher(config *rest.Config, mapping *meta.RESTMapping, scheme *runtime.Scheme) (cache.ListerWatcher, error) {
 	cli, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("encountered an error creating the client for the ScopedListerWatcher")
@@ -112,17 +116,58 @@ func (slwc *ScopedListerWatcherConfiguration) GetMetadataListerWatcher(config *r
 				return nil, err
 			}
 
-			return newGVKFixupWatcher(gvk, watcher), nil
+			return metadataWatcher(watcher), nil
 		},
 	}, nil
 }
 
-func newGVKFixupWatcher(gvk schema.GroupVersionKind, watcher watch.Interface) watch.Interface {
+// metadataWatcher converts the unstructured.Unstructured objects coming from the watch to a PartialObjectMetadata
+// If it can NOT convert it skips the event
+func metadataWatcher(watcher watch.Interface) watch.Interface {
 	return watch.Filter(
 		watcher,
 		func(in watch.Event) (watch.Event, bool) {
-			in.Object.GetObjectKind().SetGroupVersionKind(gvk)
-			return in, true
+			sObj := &metav1.PartialObjectMetadata{}
+			uObj := in.Object.(*unstructured.Unstructured)
+
+			err := runtime.DefaultUnstructuredConverter.FromUnstructured(uObj.UnstructuredContent(), sObj)
+			if err != nil {
+				return in, false
+			}
+
+			modIn := watch.Event{
+				Type:   in.Type,
+				Object: sObj,
+			}
+
+			return modIn, true
+		},
+	)
+}
+
+// structuredWatcher converts the unstructured.Unstructured objects coming from the watch to the structured watch type
+// If it can NOT convert it skips the event (returns a nil event?)
+func structuredWatcher(watcher watch.Interface, mapping *meta.RESTMapping, scheme *runtime.Scheme) watch.Interface {
+	return watch.Filter(
+		watcher,
+		func(in watch.Event) (watch.Event, bool) {
+			sObj, err := scheme.New(mapping.GroupVersionKind)
+			if err != nil {
+				return in, false
+			}
+			uObj := in.Object.(*unstructured.Unstructured)
+
+			err = runtime.DefaultUnstructuredConverter.FromUnstructured(uObj.UnstructuredContent(), sObj)
+			if err != nil {
+				return in, false
+			}
+
+			modIn := watch.Event{
+				Type:   in.Type,
+				Object: sObj,
+			}
+
+			return modIn, true
 		},
 	)
 }
