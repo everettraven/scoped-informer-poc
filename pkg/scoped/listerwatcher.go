@@ -57,3 +57,5 @@ func (sl *ScopedListerWatcher) Watch(options metav1.ListOptions) (watch.Interfac
 		return watchResourcesForNamespaces(sl.cli, sl.gvr, permittedNs, options)
 	}
 }
+
+// TODO: Write an implementation of the new CR ListerWatcherConfiguration interface
